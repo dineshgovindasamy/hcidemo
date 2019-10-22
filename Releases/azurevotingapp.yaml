@@ -46,7 +46,7 @@ metadata:
   name: azure-vote-front
   namespace: demo
 spec:
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: azure-vote-front
