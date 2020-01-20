@@ -213,7 +213,7 @@ spec:
       }
     owner: root:root
     path: /etc/kubernetes/wssd.json
-     permissions: "0644"
+    permissions: "0644"
   joinConfiguration:
     controlPlane: {}
     nodeRegistration:
