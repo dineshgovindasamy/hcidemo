@@ -241,7 +241,7 @@ spec:
   infrastructureRef:
     apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
     kind: WssdMachine
-    name: clustergroup-wssdkubernetes-controlplane-
+    name: clustergroup-wssdkubernetes-controlplane-1
     namespace: default
   version: 1.14.2
 ---
