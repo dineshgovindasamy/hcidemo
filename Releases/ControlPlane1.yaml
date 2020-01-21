@@ -1,1 +1,267 @@
+apiVersion: bootstrap.cluster.x-k8s.io/v1alpha2
+kind: KubeadmConfig
+metadata:
+  name: clustergroup-wssdkubernetes-controlplane-1
+  namespace: default
+spec:
+  clusterConfiguration:
+    apiServer:
+      extraArgs:
+        audit-log-maxage: "30"
+        audit-log-maxbackup: "10"
+        audit-log-maxsize: "100"
+        audit-log-path: /var/log/apiserver/audit.log
+        profiling: "false"
+    controllerManager:
+      extraArgs:
+        profiling: "false"
+        terminated-pod-gc-threshold: "10"
+    scheduler:
+      extraArgs:
+        profiling: "false"
+  files:
+  - content: |
+      #!/bin/bash
 
+      set -eux
+
+      function os_setup {
+        command -v "awk" >/dev/null 2>&1 || tdnf install -y awk
+      }
+
+      function wssd_setup() {
+        curl -o /usr/bin/wssdcloudctl http://10.231.110.37/AzureEdge/0.4/wssdcloudctl
+        chmod 755 /usr/bin/wssdcloudctl
+        export WSSD_DEBUG_MODE=on
+        wssdcloudctl security keyvault secret set --vault-name clustergroup-wssdkubernetes --name clustergroup-wssdkubernetes-controlplane-1-ip --value "$(ip addr show eth0 | grep "inet\b" | awk '{print $2}' | cut -d/ -f1)" --cloudFqdn 10.128.46.95  > /dev/null
+      }
+
+      function dockerd_prereq() {
+        swapoff -a
+        modprobe overlay
+        modprobe br_netfilter
+
+        cat > /etc/sysctl.d/99-sysctl-kubernetes-cri.conf <<EOF
+      net.bridge.bridge-nf-call-iptables  = 1
+      net.ipv4.ip_forward                 = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      EOF
+
+        iptables -P INPUT ACCEPT
+        iptables -P OUTPUT ACCEPT
+        iptables -P FORWARD ACCEPT
+
+        sysctl --system
+      }
+
+      function dockerd_install() {
+
+        # Workaround a date/time race issue that causes apt-get update to fail
+        until apt-get update; do
+          sleep 1
+        done
+
+        # Steps from https://kubernetes.io/docs/setup/cri/
+
+        ### Install packages to allow apt to use a repository over HTTPS
+        apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+
+        ### Add Dockers official GPG key
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
+
+        ### Add Docker apt repository.
+        add-apt-repository \
+          "deb [arch=amd64] https://download.docker.com/linux/ubuntu \
+          $(lsb_release -cs) \
+          stable"
+
+        ## Install Docker CE.
+        apt-get update && apt-get install -y docker-ce=18.06*
+
+        # Setup daemon.
+        cat > /etc/docker/daemon.json <<EOF
+      {
+      "exec-opts": ["native.cgroupdriver=systemd"],
+      "log-driver": "json-file",
+      "log-opts": {
+        "max-size": "100m"
+      },
+      "storage-driver": "overlay2"
+      }
+      EOF
+
+        mkdir -p /etc/systemd/system/docker.service.d
+      }
+
+      function dockerd_start() {
+        systemctl daemon-reload
+        systemctl enable docker
+        systemctl restart docker
+      }
+
+      function kubernetes_install_ubuntu() {
+        apt-get update && apt-get install -y apt-transport-https curl
+        curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+        cat <<EOF >/etc/apt/sources.list.d/kubernetes.list
+      deb https://apt.kubernetes.io/ kubernetes-xenial main
+      EOF
+        apt-get update
+        apt-get install -y kubelet="1.14.2-00" kubeadm="1.14.2-00" kubectl="1.14.2-00"
+        apt-mark hold kubelet kubeadm kubectl
+      }
+
+      function kubernetes_install_mariner() {
+        K8S_VERSION="1.14.2"
+        KUBEADM_VERSION="1.14.2"
+        tdnf install -y kubernetes-1.14.2-1.am1 kubernetes-kubeadm-1.14.2-1.am1 kubernetes-pause-1.14.2-1.am1
+
+        cat > /etc/sysctl.d/90-kubelet.conf << EOF
+      vm.overcommit_memory=1
+      kernel.panic=10
+      kernel.panic_on_oops=1
+      EOF
+        sysctl -p /etc/sysctl.d/90-kubelet.conf
+        sudo swapoff -a
+      }
+
+      function containerd_install_mariner() {
+        install -D -m 644 /dev/null /etc/crictl.yaml
+        printf '%s\n' 'runtime-endpoint: unix:///run/containerd/containerd.sock' > /etc/crictl.yaml
+
+        mkdir -p /etc/containerd
+        containerd config default > /etc/containerd/config.toml
+
+        systemctl restart containerd
+      }
+
+      # First setup the os with any required packages (e.g. awk)
+      os_setup
+
+      if [ "$(hostnamectl | awk '/Operating System:/ {print $3}')" = "Microsoft" ]; then
+        # Mariner steps
+        wssd_setup
+        dockerd_prereq
+        dockerd_start
+        kubernetes_install_mariner
+        containerd_install_mariner
+      else
+        # Ubuntu etc steps
+        wssd_setup
+        dockerd_prereq
+        dockerd_install
+        dockerd_start
+        kubernetes_install_ubuntu
+      fi
+    owner: root:root
+    path: /tmp/kubeadm-bootstrap.sh
+    permissions: "0744"
+  - content: |
+      #!/bin/bash
+
+      set -euxo pipefail
+
+      function kube_config() {
+        mkdir -p /home/wssduser/.kube
+        cp /etc/kubernetes/admin.conf /home/wssduser/.kube/config
+        chown wssduser /home/wssduser/.kube
+        chown wssduser /home/wssduser/.kube/config
+      }
+
+      function flannel_install() {
+        mkdir -p /etc/kubernetes/cni
+        wget https://github.com/madhanrm/wssd/releases/latest/download/kube-flannel.yml -P /etc/kubernetes/cni
+        sed  -ri 's/"name": "cbr0"/"name": "vxlan0"/'  /etc/kubernetes/cni/kube-flannel.yml
+        sed  -ri 's/"Type": "vxlan"/"Type": "vxlan",\n        "VNI": 4096,\n        "Port": 4789/'  /etc/kubernetes/cni/kube-flannel.yml
+        KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f /etc/kubernetes/cni/kube-flannel.yml
+      }
+
+      function wssd_setup() {
+        export WSSD_DEBUG_MODE=on
+        wssdcloudctl security keyvault secret set --vault-name clustergroup-wssdkubernetes --name kubeconf --file /etc/kubernetes/admin.conf --cloudFqdn 10.128.46.95  > /dev/null
+        wssdcloudctl security keyvault secret set --vault-name clustergroup-wssdkubernetes --name joincommand --value "$(kubeadm token create --print-join-command)" --cloudFqdn 10.128.46.95  > /dev/null
+      }
+
+      function patch_node_providerid() {
+        KUBECONFIG=/etc/kubernetes/admin.conf kubectl patch node clustergroup-wssdkubernetes-controlplane-1 -p $'spec:\n providerID: wssd:////clustergroup-wssdkubernetes-controlplane-1'
+      }
+
+      kube_config
+      flannel_install
+      wssd_setup
+      patch_node_providerid
+    owner: root:root
+    path: /tmp/kubeadm-postinstall.sh
+    permissions: "0744"
+  - content: |
+      {
+        "cloud": "WSSDOnpremiseCloud",
+        "tenantID": "",
+        "subscriptionID": "1234",
+        "resourceGroup": "test",
+        "securityGroupName": "",
+        "location": "westus2",
+        "vmType": "vmss",
+        "vnetName": "External",
+        "vnetResourceGroup": "test",
+        "subnetName": "cluster",
+        "routeTableName": "",
+        "userAssignedID": "",
+        "loadBalancerSku": "Standard",
+        "maximumLoadBalancerRuleCount": 250,
+        "useManagedIdentityExtension": true,
+        "useInstanceMetadata": true
+      }
+    owner: root:root
+    path: /etc/kubernetes/wssd.json
+    permissions: "0644"
+  joinConfiguration:
+    controlPlane: {}
+    nodeRegistration:
+      name: "clustergroup-wssdkubernetes-controlplane-1"
+  postKubeadmCommands:
+  - bash -c /tmp/kubeadm-postinstall.sh
+  preKubeadmCommands:
+  - bash -c /tmp/kubeadm-bootstrap.sh
+---
+apiVersion: cluster.x-k8s.io/v1alpha2
+kind: Machine
+metadata:
+  labels:
+    cluster.x-k8s.io/cluster-name: clustergroup-wssdkubernetes
+    cluster.x-k8s.io/control-plane: "true"
+  name: clustergroup-wssdkubernetes-controlplane-1
+  namespace: default
+spec:
+  bootstrap:
+    configRef:
+      apiVersion: bootstrap.cluster.x-k8s.io/v1alpha2
+      kind: KubeadmConfig
+      name: clustergroup-wssdkubernetes-controlplane-1
+      namespace: default
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
+    kind: WssdMachine
+    name: clustergroup-wssdkubernetes-controlplane-1
+    namespace: default
+  version: 1.14.2
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha2
+kind: WssdMachine
+metadata:
+  name: clustergroup-wssdkubernetes-controlplane-1
+  namespace: default
+spec:
+  image:
+    offer: UbuntuServer
+    publisher: Canonical
+    sku: 18.04-LTS
+    version: latest
+  location: westus
+  osDisk:
+    diskSizeGB: 30
+    managedDisk:
+      storageAccountType: Premium_LRS
+    name: mariner
+    osType: Linux
+  sshPublicKey: c3NoLXJzYSBBQUFBQjNOemFDMXljMkVBQUFBREFRQUJBQUFCQVFDNTZsMGZOZCtFa1NnWEFxWFF6T2VLcVJRL0JPKy9VZENpZzY0aW5zR0Jla1RReDl3OFNRdkVKWCtPdlNsSU85N21RSG5Sd3I3cnlsQjVrSTk3eko1T21YSmlxdU1ZV2s0NExJQ0N4MTVTRzhxWE5uZWlGQmtRZUI4VlNjVEgrdFBjMmhFcStuRndZdXY0OHUxbjNiQzBCWVhyZ3lNMUVDeUszeFZqZnVpMlpwdU0yUXVuR3QvVFVzVjBtd1FIT0p5MzdSSHZJWXR5UGlBaDdXb1Jsd2xYeldWenRHZU9Ta3I4b0VqRnN1Und6NENDeDgwL2lJblpjbENzNTZpN2ZSTGZhT1dXQ1NPby94UDlaaWJsRlpLRnovQk1ZV1IvMVljWWQ4OFhmZGhlSlJrZUZNeWcvc3A5Z0UrbjF4QTJxT0RZOThZdXVvcWFCaXMrN1RHWXVQYkY=
+  vmSize: Standard_B2ms
