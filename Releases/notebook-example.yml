@@ -28,7 +28,7 @@ spec:
     image: gcr.io/kubeflow/tensorflow-notebook-gpu:latest
     resources:
       limits:
-        nvidia.com/gpu: 1
+        nvidia.com/gpu: 0
     ports:
     - containerPort: 8888
       name: notebook
