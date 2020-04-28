@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flying-kube
+spec:
+  selector:
+    matchLabels:
+      app: flying-kube
+  replicas: 50
+  template:
+    metadata:
+      labels:
+        app: flying-kube
+    spec:
+      containers:
+      - name: flying-kube
+        image: hbai/flying-kube
+        ports:
+        - containerPort: 8001
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flying-kube-svc
+spec:
+  selector:
+    app: flying-kube
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8001
+  type: LoadBalancer
