@@ -1,18 +1,45 @@
-apiVersion: v1
-kind: Pod
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: resnet-gpu-pod
+  name: resnetgpu-app
 spec:
-  imagePullSecrets:
-    - name: nvcr.dgxkey
-  containers:
-    - name: resnet
-      image: nvcr.io/nvidia/tensorflow:18.07-py3
-      command: ["mpiexec"]
-      args: ["--allow-run-as-root", "--bind-to", "socket", "-np", "1", "python", "/opt/tensorflow/nvidia-examples/cnn/resnet.py", "--layers=50", "--precision=fp16", "--batch_size=64", "--num_iter=90"]
-      resources:
-        limits:
-          nvidia.com/gpu: 1
-        requests:
-          nvidia.com/gpu: 1
-  restartPolicy: Never
+  selector:
+    matchLabels:
+      app: resnetgpu-app
+  replicas: 0
+  template:
+    metadata:
+      labels:
+        app: resnetgpu-app
+    spec:
+      containers:
+      - name: resnetgpu-app
+        image: nvcr.io/nvidia/tensorflow:18.07-py3
+        command: ["mpiexec"]
+        args: ["--allow-run-as-root", "--bind-to", "socket", "-np", "1", "python", "/opt/tensorflow/nvidia-examples/cnn/resnet.py", "--layers=50", "--precision=fp16", "--batch_size=64", "--num_iter=90"]
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+          requests:
+            nvidia.com/gpu: 1
+        ports:
+        - containerPort: 8888
+        name: resnetgpu-app
+      nodeSelector:
+        beta.kubernetes.io/os: linux
+      imagePullSecrets: 
+      - name: nvcr.dgxkey        
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: resnetgpu-app-svc
+spec:
+  type: NodePort
+  ports:
+  - port: 80
+    name: http
+    targetPort: 8888
+    nodePort: 30005
+  selector:
+    app: resnetgpu-app
