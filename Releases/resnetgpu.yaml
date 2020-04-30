@@ -6,7 +6,7 @@ spec:
   selector:
     matchLabels:
       app: resnetgpu-app
-  replicas: 1
+  replicas: 0
   template:
     metadata:
       labels:
