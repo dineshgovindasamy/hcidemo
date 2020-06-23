@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: resnet-gpu-pod
+  name: resnet-gpu-pod1
 spec:
   imagePullSecrets:
     - name: nvcr.dgxkey
